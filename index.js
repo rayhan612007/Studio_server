@@ -27,7 +27,12 @@ app.get('/', async (req, res) => {
     const data = await studiocollection.find().toArray();
     res.send(data)
 })
-
+app.post('/add-studios', (req, res) => {
+    const data = req.body
+    console.log(data);
+    const result = studiocollection.insertOne(data)
+    res.send(result)
+})
 
 app.listen(port, () => {
     console.log(`Example app listening on port ${port}`)
