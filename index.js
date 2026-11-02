@@ -25,6 +25,7 @@ export async function connectToMongoDB() {
 const mongoclient = await connectToMongoDB();
 const database = mongoclient.db("studiodatabase");
 const studiocollection = database.collection("studiocollection");
+const bookingcollection = database.collection("bookingcollection")
 app.get('/', async (req, res) => {
     res.send({ msg: "allapi" })
 
@@ -57,13 +58,36 @@ app.patch('/my-listings/:id', async (req, res) => {
     const { id } = req.params;
     const updateddata = req.body
     const result = await studiocollection.updateOne({ _id: new ObjectId(id) }, { $set: updateddata })
-    res.status(200).send(result)
+    res.status(201).send(result)
 })
 app.get('/studios/:id', async (req, res) => {
     const { id } = req.params;
     const result = await studiocollection.findOne({ _id: new ObjectId(id) })
     res.send(result)
 })
+app.post('/my-bookings', async (req, res) => {
+    try {
+        const data = req.body;
+
+        const result = await bookingcollection.insertOne(data);
+
+        res.status(201).json({
+            message: "Booking posted successfully!",
+            result
+        });
+    } catch (error) {
+        res.status(500).json({ message: "Failed to post booking", error: error.message });
+    }
+});
+
+app.get('/my-bookings', async (req, res) => {
+    try {
+        const data = await bookingcollection.find().toArray();
+        res.send(data);
+    } catch (error) {
+        res.status(500).json({ message: "Failed to get bookings", error: error.message });
+    }
+});
 
 
 app.listen(port, () => {
