@@ -47,12 +47,7 @@ app.delete('/my-listings/:id', async (req, res) => {
     const result = await studiocollection.deleteOne({ _id: new ObjectId(id) })
     res.send(result)
 })
-app.patch('/my-listings/:id', async (req, res) => {
-    const { id } = req.params;
-    const updateddata = req.body
-    const result = await studiocollection.updateOne({ _id: new ObjectId(id) }, { $set: updateddata })
-    res.status(200).send(result)
-})
+
 app.post('/add-studios', async (req, res) => {
     const data = req.body
     const result = await studiocollection.insertOne(data)
