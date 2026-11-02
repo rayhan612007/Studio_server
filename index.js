@@ -42,10 +42,20 @@ app.get('/my-listings', async (req, res) => {
     const data = await studiocollection.find({ email: userEmail }).toArray();
     res.send(data)
 })
-app.post('/add-studios', (req, res) => {
+app.delete('/my-listings/:id', async (req, res) => {
+    const { id } = req.params;
+    const result = await studiocollection.deleteOne({ _id: new ObjectId(id) })
+    res.send(result)
+})
+app.patch('/my-listings/:id', async (req, res) => {
+    const { id } = req.params;
+    const updateddata = req.body
+    const result = await studiocollection.updateOne({ _id: new ObjectId(id) }, { $set: updateddata })
+    res.status(200).send(result)
+})
+app.post('/add-studios', async (req, res) => {
     const data = req.body
-    console.log(data);
-    const result = studiocollection.insertOne(data)
+    const result = await studiocollection.insertOne(data)
     res.send(result)
 })
 app.get('/studios/:id', async (req, res) => {
