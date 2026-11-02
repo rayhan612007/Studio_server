@@ -53,6 +53,12 @@ app.post('/add-studios', async (req, res) => {
     const result = await studiocollection.insertOne(data)
     res.send(result)
 })
+app.patch('/my-listings/:id', async (req, res) => {
+    const { id } = req.params;
+    const updateddata = req.body
+    const result = await studiocollection.updateOne({ _id: new ObjectId(id) }, { $set: updateddata })
+    res.status(200).send(result)
+})
 app.get('/studios/:id', async (req, res) => {
     const { id } = req.params;
     const result = await studiocollection.findOne({ _id: new ObjectId(id) })
