@@ -5,9 +5,9 @@ import cors from "cors";
 import multer from "multer";
 
 const app = express();
-const port = Number(process.env.PORT) || 7000;
-const frontendOrigin = process.env.FRONTEND_ORIGIN || "http://localhost:3000";
-const authServerUrl = process.env.BETTER_AUTH_URL || frontendOrigin;
+const port = Number(process.env.PORT);
+const frontendOrigin = process.env.FRONTEND_ORIGIN
+const authServerUrl = frontendOrigin;
 const mongoUrl = process.env.BETTER_AUTH_URL_DB;
 const imgbbApiKey = process.env.IMGBB_API_KEY;
 
@@ -98,7 +98,7 @@ async function requireStudioSession(req, res, next) {
 }
 
 app.get("/", (_req, res) => {
-    res.json({ msg: "allapi" });
+    res.json({ msg: "all api" });
 });
 
 app.get("/studios", async (_req, res, next) => {
@@ -138,9 +138,9 @@ app.delete("/my-listings/:id", requireStudioSession, async (req, res, next) => {
             return res.status(400).json({ error: "Invalid studio ID." });
         }
         const result = await studiocollection.deleteOne({
-                _id: new ObjectId(req.params.id),
-                email: req.studioSession.user.email.trim().toLowerCase(),
-            });
+            _id: new ObjectId(req.params.id),
+            email: req.studioSession.user.email.trim().toLowerCase(),
+        });
         if (result.deletedCount === 0) {
             return res.status(404).json({ error: "Studio listing not found." });
         }
@@ -462,9 +462,9 @@ app.use((error, _req, res, _next) => {
         ? 413
         : error instanceof multer.MulterError && error.code === "LIMIT_UNEXPECTED_FILE"
             ? 400
-        : error instanceof multer.MulterError
-            ? 400
-            : 500;
+            : error instanceof multer.MulterError
+                ? 400
+                : 500;
     const message = status === 413
         ? "Each studio image must be 10 MB or smaller."
         : status === 400
