@@ -2,14 +2,12 @@ import express from "express";
 import "dotenv/config";
 import { MongoClient, ObjectId } from "mongodb";
 import cors from "cors";
-import multer from "multer";
 
 const app = express();
 const port = Number(process.env.PORT);
 const frontendOrigin = process.env.FRONTEND_ORIGIN
 const authServerUrl = frontendOrigin;
 const mongoUrl = process.env.BETTER_AUTH_URL_DB;
-const imgbbApiKey = process.env.IMGBB_API_KEY;
 
 if (!mongoUrl) {
     throw new Error("BETTER_AUTH_URL_DB environment variable is required");
@@ -31,13 +29,6 @@ console.log("You successfully connected to MongoDB!");
 const database = client.db("studiodatabase");
 const studiocollection = database.collection("studiocollection");
 const bookingCollection = database.collection("bookings");
-const studioImageUpload = multer({
-    storage: multer.memoryStorage(),
-    limits: { fileSize: 10 * 1024 * 1024, files: 8 },
-    fileFilter: (_req, file, callback) => {
-        callback(null, file.mimetype.startsWith("image/"));
-    },
-});
 
 function isObject(value) {
     return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -132,7 +123,7 @@ app.get("/my-listings/:email", requireStudioSession, async (req, res, next) => {
     }
 });
 
-app.delete("/my-listings/:id", requireStudioSession, async (req, res, next) => {
+app.delete("/studios/:id", requireStudioSession, async (req, res, next) => {
     try {
         if (!ObjectId.isValid(req.params.id)) {
             return res.status(400).json({ error: "Invalid studio ID." });
@@ -153,15 +144,8 @@ app.delete("/my-listings/:id", requireStudioSession, async (req, res, next) => {
 app.post(
     "/add-studios",
     requireStudioSession,
-    studioImageUpload.array("images", 8),
     async (req, res, next) => {
         try {
-            if (!imgbbApiKey) {
-                return res.status(503).json({
-                    error: "Image uploads are not configured on the server.",
-                });
-            }
-
             const title = readString(req.body.title);
             const category = readString(req.body.category);
             const hourlyRate = readString(req.body.hourlyRate);
@@ -203,36 +187,24 @@ app.post(
                 return res.status(400).json({ error: "Please provide valid studio details." });
             }
 
-            if (!req.files?.length || req.files.some((file) => !file.mimetype.startsWith("image/"))) {
-                return res.status(400).json({ error: "Please upload at least one studio image." });
-            }
-
-            const gallery = [];
-            for (const file of req.files) {
-                const uploadUrl = new URL("https://api.imgbb.com/1/upload");
-                uploadUrl.searchParams.set("key", imgbbApiKey);
-                const uploadResponse = await fetch(uploadUrl, {
-                    method: "POST",
-                    headers: {
-                        "Content-Type": "application/x-www-form-urlencoded",
-                    },
-                    body: new URLSearchParams({
-                        image: file.buffer.toString("base64"),
-                    }),
+            const gallery = req.body.imageUrls;
+            if (
+                !Array.isArray(gallery) ||
+                gallery.length === 0 ||
+                gallery.length > 8 ||
+                gallery.some((imageUrl) => {
+                    if (typeof imageUrl !== "string") return true;
+                    try {
+                        const url = new URL(imageUrl);
+                        return url.protocol !== "https:";
+                    } catch {
+                        return true;
+                    }
+                })
+            ) {
+                return res.status(400).json({
+                    error: "Enter 1 to 8 valid HTTPS image URLs.",
                 });
-
-                let uploadResult;
-                try {
-                    uploadResult = await uploadResponse.json();
-                } catch {
-                    return res.status(502).json({ error: "Image upload provider returned an invalid response." });
-                }
-                const imageUrl = uploadResult?.data?.url;
-                if (!uploadResponse.ok || typeof imageUrl !== "string") {
-                    console.error("ImgBB image upload failed:", uploadResult?.error?.message);
-                    return res.status(502).json({ error: "Unable to upload the studio images." });
-                }
-                gallery.push(imageUrl);
             }
 
             const studio = {
@@ -260,7 +232,7 @@ app.post(
     },
 );
 
-app.patch("/my-listings/:id", requireStudioSession, async (req, res, next) => {
+app.patch("/studios/:id", requireStudioSession, async (req, res, next) => {
     try {
         if (!ObjectId.isValid(req.params.id)) {
             return res.status(400).json({ error: "Invalid studio ID." });
@@ -307,6 +279,7 @@ app.patch("/my-listings/:id", requireStudioSession, async (req, res, next) => {
         next(error);
     }
 });
+// to do 
 
 app.get("/studios/:id", async (req, res, next) => {
     try {
@@ -340,7 +313,7 @@ app.get("/bookings", async (req, res, next) => {
     }
 });
 
-app.post("/bookings", async (req, res) => {
+app.post("/bookings", requireStudioSession, async (req, res) => {
     const session = await requireSession(req, res);
     if (!session) return;
 
@@ -458,19 +431,7 @@ app.patch("/bookings/:id", async (req, res) => {
 
 app.use((error, _req, res, _next) => {
     console.error("API request failed:", error);
-    const status = error instanceof multer.MulterError && error.code === "LIMIT_FILE_SIZE"
-        ? 413
-        : error instanceof multer.MulterError && error.code === "LIMIT_UNEXPECTED_FILE"
-            ? 400
-            : error instanceof multer.MulterError
-                ? 400
-                : 500;
-    const message = status === 413
-        ? "Each studio image must be 10 MB or smaller."
-        : status === 400
-            ? "Upload up to 8 images using the images field."
-            : "Unable to complete the request.";
-    res.status(status).json({ error: message });
+    res.status(500).json({ error: "Unable to complete the request." });
 });
 
 app.listen(port, () => {
