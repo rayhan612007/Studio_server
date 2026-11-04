@@ -11,5 +11,11 @@
             "source": "/(.*)",
             "destination": "index.js"
         }
+    ],
+    "crons": [
+        {
+            "path": "/cron/bookings",
+            "schedule": "*/5 * * * *"
+        }
     ]
 }

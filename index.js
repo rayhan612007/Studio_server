@@ -8,6 +8,7 @@ const port = Number(process.env.PORT);
 const frontendOrigin = process.env.FRONTEND_ORIGIN
 const authServerUrl = frontendOrigin;
 const mongoUrl = process.env.BETTER_AUTH_URL_DB;
+const cronSecret = process.env.CRON_SECRET;
 
 if (!mongoUrl) {
     throw new Error("BETTER_AUTH_URL_DB environment variable is required");
@@ -44,6 +45,62 @@ function readOptionalString(value) {
 
 function serializeBooking({ _id, ...booking }) {
     return { ...booking, id: _id.toString() };
+}
+
+function matchesZonedTime(value, bookingDate, bookingTime, timeZone) {
+    try {
+        const date = new Date(value);
+        if (Number.isNaN(date.getTime()) || date.toISOString() !== value) return false;
+
+        const parts = new Intl.DateTimeFormat("en-CA", {
+            timeZone,
+            year: "numeric",
+            month: "2-digit",
+            day: "2-digit",
+            hour: "2-digit",
+            minute: "2-digit",
+            hourCycle: "h23",
+        }).formatToParts(date);
+        const values = Object.fromEntries(
+            parts
+                .filter((part) => part.type !== "literal")
+                .map(({ type, value: partValue }) => [type, partValue]),
+        );
+
+        return (
+            `${values.year}-${values.month}-${values.day}` === bookingDate &&
+            `${values.hour}:${values.minute}` === bookingTime
+        );
+    } catch {
+        return false;
+    }
+}
+
+function getBookingOverlapFilter(studioId, bookingDate, startTime, endTime, startAt, endAt) {
+    return {
+        "studio.id": studioId,
+        status: "Confirmed",
+        $or: [
+            {
+                startAt: { $lt: endAt },
+                endAt: { $gt: startAt },
+            },
+            {
+                startAt: { $exists: false },
+                bookingDate,
+                startTime: { $lt: endTime },
+                endTime: { $gt: startTime },
+            },
+        ],
+    };
+}
+
+async function runBookingMaintenance(now = new Date()) {
+    await bookingCollection.updateMany(
+        { status: "Confirmed", endAt: { $lte: now } },
+        { $set: { status: "Completed", updatedAt: now } },
+    );
+
 }
 
 async function getCurrentSession(req) {
@@ -301,6 +358,7 @@ app.get("/bookings", async (req, res, next) => {
     if (!session) return;
 
     try {
+        await runBookingMaintenance();
         const { id: userId, email } = session.user;
         const bookings = await bookingCollection
             .find({ $or: [{ userId }, { email }] })
@@ -314,8 +372,7 @@ app.get("/bookings", async (req, res, next) => {
 });
 
 app.post("/bookings", requireStudioSession, async (req, res) => {
-    const session = await requireSession(req, res);
-    if (!session) return;
+    const session = req.studioSession;
 
     const payload = req.body;
     if (!isObject(payload) || !isObject(payload.studio)) {
@@ -323,74 +380,263 @@ app.post("/bookings", requireStudioSession, async (req, res) => {
     }
 
     const studioPayload = payload.studio;
-    const title = readString(studioPayload.title);
     const studioId =
         readOptionalString(studioPayload._id) ??
         readOptionalString(studioPayload.id);
     const bookingDate = readString(payload.bookingDate);
     const startTime = readString(payload.startTime);
     const endTime = readString(payload.endTime);
+    const timeZone = readString(payload.timeZone);
+    const startAtValue = readString(payload.startAt);
+    const endAtValue = readString(payload.endAt);
 
     if (
-        !title ||
         !studioId ||
+        !ObjectId.isValid(studioId) ||
         !bookingDate ||
         !/^\d{4}-\d{2}-\d{2}$/.test(bookingDate) ||
         !startTime ||
         !/^([01]\d|2[0-3]):[0-5]\d$/.test(startTime) ||
         !endTime ||
         !/^([01]\d|2[0-3]):[0-5]\d$/.test(endTime) ||
-        startTime >= endTime
+        startTime >= endTime ||
+        !timeZone ||
+        !startAtValue ||
+        !endAtValue ||
+        !matchesZonedTime(startAtValue, bookingDate, startTime, timeZone) ||
+        !matchesZonedTime(endAtValue, bookingDate, endTime, timeZone)
     ) {
         return res.status(400).json({
-            error: "A studio, valid date, and valid time range are required.",
+            error: "A studio, valid date, time range, and timezone are required.",
         });
     }
 
-    const booking = {
-        userId: session.user.id,
-        email: session.user.email,
-        fullName: session.user.name,
-        studio: {
-            id: studioId,
-            title,
-            category: readOptionalString(studioPayload.category),
-            location: readOptionalString(studioPayload.location),
-            imageUrl: readOptionalString(studioPayload.imageUrl),
-            hourlyRate: readOptionalString(studioPayload.hourlyRate),
-        },
-        bookingDate,
-        startTime,
-        endTime,
-        notes: readOptionalString(payload.notes) ?? "",
-        status: "Pending",
-        createdAt: new Date(),
-        updatedAt: new Date(),
-    };
+    const startAt = new Date(startAtValue);
+    const endAt = new Date(endAtValue);
+    const now = new Date();
+    if (startAt <= now || endAt <= startAt) {
+        return res.status(400).json({
+            error: "Choose a future booking time with an end time after its start time.",
+        });
+    }
 
     try {
-        const conflictingBooking = await bookingCollection.findOne({
-            "studio.id": studioId,
-            bookingDate,
-            status: "Confirmed",
-            startTime: { $lt: endTime },
-            endTime: { $gt: startTime },
-        });
+        await runBookingMaintenance(now);
 
-        if (conflictingBooking) {
-            return res.status(409).json({
-                error: "This studio is already booked for the selected time. Please choose another time.",
-            });
+        const studioRecord = await studiocollection.findOne({
+            _id: new ObjectId(studioId),
+        });
+        if (!studioRecord) {
+            return res.status(404).json({ error: "Studio not found." });
         }
 
-        const result = await bookingCollection.insertOne(booking);
+        const transactionSession = client.startSession();
+        let booking;
+        let bookingId;
+        let conflictFound = false;
+        try {
+            await transactionSession.withTransaction(async () => {
+                conflictFound = false;
+                booking = undefined;
+                bookingId = undefined;
+
+                const lockResult = await studiocollection.updateOne(
+                    { _id: new ObjectId(studioId) },
+                    { $inc: { bookingRevision: 1 } },
+                    { session: transactionSession },
+                );
+                if (lockResult.matchedCount === 0) return;
+
+                const conflictingBooking = await bookingCollection.findOne(
+                    getBookingOverlapFilter(
+                        studioId,
+                        bookingDate,
+                        startTime,
+                        endTime,
+                        startAt,
+                        endAt,
+                    ),
+                    { session: transactionSession },
+                );
+                if (conflictingBooking) {
+                    conflictFound = true;
+                    return;
+                }
+
+                booking = {
+                    userId: session.user.id,
+                    email: session.user.email,
+                    fullName: session.user.name,
+                    studio: {
+                        id: studioId,
+                        title: readString(studioRecord.title) ?? "Studio",
+                        category: readOptionalString(studioRecord.category),
+                        location: readOptionalString(studioRecord.location),
+                        imageUrl: readOptionalString(studioRecord.imageUrl),
+                        hourlyRate: readOptionalString(studioRecord.hourlyRate),
+                    },
+                    bookingDate,
+                    startTime,
+                    endTime,
+                    timeZone,
+                    startAt,
+                    endAt,
+                    notes: readOptionalString(payload.notes) ?? "",
+                    status: "Pending",
+                    createdAt: now,
+                    updatedAt: now,
+                };
+                const result = await bookingCollection.insertOne(booking, {
+                    session: transactionSession,
+                });
+                bookingId = result.insertedId;
+            });
+        } finally {
+            await transactionSession.endSession();
+        }
+
+        if (conflictFound) {
+            return res.status(409).json({
+                error: "This studio is already booked for the selected time. Choose another time.",
+            });
+        }
+        if (!booking || !bookingId) {
+            return res.status(404).json({ error: "Studio not found." });
+        }
+
         res.status(201).json({
             ...booking,
-            id: result.insertedId.toString(),
+            id: bookingId.toString(),
         });
     } catch (error) {
         console.error("Failed to create booking:", error);
         res.status(500).json({ error: "Unable to create booking." });
+    }
+});
+
+app.post("/bookings/:id/confirm", async (req, res) => {
+    const session = await requireSession(req, res);
+    if (!session) return;
+
+    const { id } = req.params;
+    if (!ObjectId.isValid(id)) {
+        return res.status(404).json({ error: "Booking not found." });
+    }
+
+    try {
+        const ownershipFilter = {
+            _id: new ObjectId(id),
+            $or: [
+                { userId: session.user.id },
+                { email: session.user.email },
+            ],
+        };
+        const existingBooking = await bookingCollection.findOne(ownershipFilter);
+        if (!existingBooking) {
+            return res.status(404).json({ error: "Booking not found." });
+        }
+        if (existingBooking.status !== "Pending") {
+            return res.status(409).json({
+                error: "Only pending bookings can be confirmed.",
+            });
+        }
+
+        const studioObjectId = ObjectId.isValid(existingBooking.studio?.id)
+            ? new ObjectId(existingBooking.studio.id)
+            : null;
+        if (!studioObjectId) {
+            return res.status(400).json({ error: "This booking has an invalid studio." });
+        }
+        if (
+            !(existingBooking.startAt instanceof Date) ||
+            !(existingBooking.endAt instanceof Date) ||
+            existingBooking.startAt <= new Date()
+        ) {
+            return res.status(409).json({
+                error: "This booking time has already started and cannot be confirmed.",
+            });
+        }
+
+        const transactionSession = client.startSession();
+        let conflictFound = false;
+        let confirmed = false;
+        try {
+            await transactionSession.withTransaction(async () => {
+                const lockResult = await studiocollection.updateOne(
+                    { _id: studioObjectId },
+                    { $inc: { bookingRevision: 1 } },
+                    { session: transactionSession },
+                );
+                if (lockResult.matchedCount === 0) return;
+
+                const booking = await bookingCollection.findOne(
+                    { ...ownershipFilter, status: "Pending" },
+                    { session: transactionSession },
+                );
+                if (!booking) return;
+                if (!(booking.startAt instanceof Date) || booking.startAt <= new Date()) {
+                    return;
+                }
+
+                const conflict = await bookingCollection.findOne(
+                    getBookingOverlapFilter(
+                        booking.studio.id,
+                        booking.bookingDate,
+                        booking.startTime,
+                        booking.endTime,
+                        booking.startAt,
+                        booking.endAt,
+                    ),
+                    { session: transactionSession },
+                );
+                if (conflict) {
+                    conflictFound = true;
+                    return;
+                }
+
+                const result = await bookingCollection.updateOne(
+                    { _id: booking._id, status: "Pending" },
+                    { $set: { status: "Confirmed", updatedAt: new Date() } },
+                    { session: transactionSession },
+                );
+                confirmed = result.modifiedCount === 1;
+            });
+        } finally {
+            await transactionSession.endSession();
+        }
+
+        if (conflictFound) {
+            return res.status(409).json({
+                error: "This studio is already booked for this time. The booking remains pending.",
+            });
+        }
+        if (!confirmed) {
+            return res.status(409).json({
+                error: "This booking could not be confirmed. Refresh your bookings and try again.",
+            });
+        }
+
+        res.json({ id, status: "Confirmed" });
+    } catch (error) {
+        console.error("Failed to confirm booking:", error);
+        res.status(500).json({ error: "Unable to confirm booking." });
+    }
+});
+
+app.get("/cron/bookings", async (req, res) => {
+    if (!cronSecret) {
+        return res.status(503).json({ error: "Booking cron is not configured." });
+    }
+    if (req.headers.authorization !== `Bearer ${cronSecret}`) {
+        return res.status(401).json({ error: "Unauthorized." });
+    }
+
+    try {
+        await runBookingMaintenance();
+        res.json({ ok: true });
+    } catch (error) {
+        console.error("Failed to update booking statuses:", error);
+        res.status(500).json({ error: "Unable to update booking statuses." });
     }
 });
 

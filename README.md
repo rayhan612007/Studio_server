@@ -20,7 +20,8 @@
 
 - **RESTful API Architecture:** Clean and organized endpoints powering studio listings and app logic.
 - **Database Integration:** Scalable data storage and management using **MongoDB**.
-- **Media Uploads:** Integrated file handling via **Multer** and direct upload streaming to **ImageBB API**.
+- **Studio Images:** Stores externally hosted HTTPS image URLs with each studio listing.
+- **Booking Management:** Saves new reservations as Pending; users confirm from My Bookings, where the server checks for overlapping confirmed slots. Confirmed bookings become Completed after their scheduled end time.
 - **Serverless Ready:** Configured with `vercel.json` for seamless serverless deployment.
 
 ---
@@ -30,7 +31,6 @@
 - **Runtime:** [Node.js](https://nodejs.org/)
 - **Framework:** [Express.js](https://expressjs.com/)
 - **Database:** [MongoDB](https://www.mongodb.com/)
-- **File Uploads:** Multer & ImageBB API
 - **Deployment:** [Vercel](https://vercel.com/)
 
 ---
@@ -44,6 +44,8 @@ Follow these instructions to set up and run the project locally for development.
 Make sure you have Node.js installed on your system:
 - [Node.js](https://nodejs.org/) (v18+ recommended)
 - npm, yarn, pnpm, or bun
+
+Configure `CRON_SECRET` in the deployment environment so the scheduled booking-status job can authenticate. Booking creation uses MongoDB transactions to serialize reservations for the same studio; use a MongoDB replica set deployment such as MongoDB Atlas.
 
 ### Installation
 
